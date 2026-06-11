@@ -1,0 +1,16 @@
+{
+  "name": "b24-dev-hub-mcp",
+  "version": "1.0.0",
+  "description": "Local MCP server for Bitrix24 Developer Hub — intelligent search across SDKs, UI tools, REST API docs, examples, and templates",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0",
+    "glob": "^11.0.0"
+  }
+}

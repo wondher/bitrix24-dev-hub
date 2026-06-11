@@ -23,3 +23,6 @@ __pycache__/
 dist/
 .output/
 .nuxt/
+
+# MCP server dependencies
+mcp-server/node_modules/

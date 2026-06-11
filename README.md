@@ -17,9 +17,41 @@ git submodule update --init --recursive
 
 ## 🤖 AI-Assisted Development
 
-This hub is designed for AI consultation. The root [`CLAUDE.md`](CLAUDE.md) provides structured context about every SDK, tool, and documentation set — enabling AI agents (Claude, Copilot, etc.) to navigate and reference Bitrix24 development resources efficiently.
+This hub ships with a **local MCP server** (`b24-dev-hub`) that provides intelligent search and retrieval across all resources. It indexes **11,000+ files** from SDKs, UI components, REST API docs, examples, and templates.
 
-For MCP filesystem access, expose this directory to your AI tools.
+### MCP Server Setup
+
+The server is pre-configured in [`.mcp.json`](.mcp.json). To use it with Claude Code:
+
+1. Open this project in Claude Code
+2. The MCP server starts automatically — approve it when prompted
+3. Run `npm install` inside `mcp-server/` if dependencies are missing
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `b24hub_search` | Universal search across all repos with scope/language filtering |
+| `b24hub_get` | Read any file from the hub by path |
+| `b24hub_api_method` | Get REST API method documentation (e.g., `crm.lead.add`) |
+| `b24hub_api_event` | Get REST API event documentation (e.g., `OnCrmLeadAdd`) |
+| `b24hub_sdk_ref` | Get SDK class/method source code (PHP, JS, or Python) |
+| `b24hub_ui_component` | Get UI Kit component source and documentation |
+| `b24hub_examples` | Find code examples by topic and language |
+| `b24hub_list` | List available resources by category (methods, components, etc.) |
+| `b24hub_grep` | Search file contents with context lines |
+
+### Standalone Usage
+
+```bash
+# Run the MCP server directly
+node mcp-server/index.js
+
+# Or install dependencies first
+cd mcp-server && npm install && npm start
+```
+
+The root [`CLAUDE.md`](CLAUDE.md) provides structured context for AI agents navigating this hub.
 
 ## 📚 Table of Contents
 
