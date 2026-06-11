@@ -1,6 +1,25 @@
 <img src="./b24devhub-header.png" alt="Bitrix24 Developer Hub" width="1195"/>
 
-Welcome to the central hub for Bitrix24 developer tools. This repository offers a curated collection of official SDKs, UI kits, examples, and application templates to streamline your development process with the Bitrix24 platform.
+Welcome to the central hub for Bitrix24 developer tools. This repository aggregates all official SDKs, UI kits, design tokens, examples, application templates, and REST API documentation as **git submodules** — providing a single local reference for development and AI-assisted consultation.
+
+## 🚀 Quick Start
+
+```bash
+# Clone with all submodules
+git clone --recurse-submodules https://github.com/wondher/bitrix24-dev-hub.git
+
+# If already cloned without submodules
+git submodule update --init --recursive
+
+# Update all submodules to latest upstream
+./scripts/update-repos.sh
+```
+
+## 🤖 AI-Assisted Development
+
+This hub is designed for AI consultation. The root [`CLAUDE.md`](CLAUDE.md) provides structured context about every SDK, tool, and documentation set — enabling AI agents (Claude, Copilot, etc.) to navigate and reference Bitrix24 development resources efficiently.
+
+For MCP filesystem access, expose this directory to your AI tools.
 
 ## 📚 Table of Contents
 
@@ -16,6 +35,7 @@ Welcome to the central hub for Bitrix24 developer tools. This repository offers 
 - [Application Templates](#application-templates)
   - [Automation rules library](#automation-rules-library)
 - [Documentation](#documentation)
+- [Additional Resources](#additional-resources)
 
 ## SDKs and Libraries
 
@@ -23,45 +43,45 @@ Welcome to the central hub for Bitrix24 developer tools. This repository offers 
 
 - **b24phpsdk**: The official PHP library for interacting with the Bitrix24 REST API. It supports both OAuth tokens and incoming webhooks, with features like automatic token renewal and offline queues.
 
-  [GitHub Repository](https://github.com/bitrix24/b24phpsdk). Find more details in the [documentation](https://apidocs.bitrix24.com/api-reference/b24phpsdk/index.html)
+  📁 Local: [`sdks/php/`](sdks/php/) · [GitHub Repository](https://github.com/bitrix24/b24phpsdk) · [Documentation](https://apidocs.bitrix24.com/api-reference/b24phpsdk/index.html)
 
 ### JavaScript/Node.js SDK
 
 - **b24jssdk**: The official JavaScript SDK for Bitrix24 REST API, compatible with both browser and Node.js environments. It supports modern JavaScript features and offers advantages over the traditional BX24.JS library.
 
-  [GitHub Repository](https://github.com/bitrix24/b24jssdk). Find more details in the [documentation](https://bitrix24.github.io/b24jssdk/)
+  📁 Local: [`sdks/js/`](sdks/js/) · [GitHub Repository](https://github.com/bitrix24/b24jssdk) · [Documentation](https://bitrix24.github.io/b24jssdk/)
 
 ### Python SDK
 
-- **b24pydk**: The official Python library for interacting with the Bitrix24 REST API (beta version). It supports both OAuth tokens and incoming webhooks, with features like automatic token renewal and batch calls.
+- **b24pysdk**: The official Python library for interacting with the Bitrix24 REST API (beta version). It supports both OAuth tokens and incoming webhooks, with features like automatic token renewal and batch calls.
 
-  [GitHub Repository](https://github.com/bitrix24/b24pysdk). 
-  
+  📁 Local: [`sdks/python/`](sdks/python/) · [GitHub Repository](https://github.com/bitrix24/b24pysdk)
+
 ## UI Tools
 
 ### Bitrix24 UI Kit
 
 - **b24ui**: A UI kit for developing web applications using the Bitrix24 REST API, built on NUXT & VUE. It provides a set of reusable components to accelerate development.
 
-  [GitHub Repository](https://github.com/bitrix24/b24ui). Find more details in the [documentation](https://bitrix24.github.io/b24ui/)
+  📁 Local: [`ui/components/`](ui/components/) · [GitHub Repository](https://github.com/bitrix24/b24ui) · [Documentation](https://bitrix24.github.io/b24ui/)
 
 ### Design Tokens
 
-- **b24style**: Design tokens for Bitrix24 UI Kit. Provides the ability to create application interfaces that closely match the Bitrix24 user interface using Tailwind CSS utility classes. 
+- **b24style**: Design tokens for Bitrix24 UI Kit. Provides the ability to create application interfaces that closely match the Bitrix24 user interface using Tailwind CSS utility classes.
 
-  [GitHub Repository](https://github.com/bitrix24/b24style). Find more details in the [documentation](https://bitrix24.github.io/b24style/)
+  📁 Local: [`ui/style/`](ui/style/) · [GitHub Repository](https://github.com/bitrix24/b24style) · [Documentation](https://bitrix24.github.io/b24style/)
 
 ### Icons
 
 - **b24icons**: The library contains SVG icons for use in the interfaces of both local and mass-market applications for Bitrix24.
 
-  [GitHub Repository](https://github.com/bitrix24/b24icons). Find more details in the [documentation](https://bitrix24.github.io/b24icons/)
+  📁 Local: [`ui/icons/`](ui/icons/) · [GitHub Repository](https://github.com/bitrix24/b24icons) · [Documentation](https://bitrix24.github.io/b24icons/)
 
 ## Usage Examples
 
 - **b24sdk-examples**: A collection of examples demonstrating the usage of various Bitrix24 SDKs and tools in real-world scenarios.
 
-  [GitHub Repository](https://github.com/bitrix24/b24sdk-examples). Find more details in the [documentation](https://bitrix24.github.io/b24ui/)
+  📁 Local: [`examples/sdk-examples/`](examples/sdk-examples/) · [GitHub Repository](https://github.com/bitrix24/b24sdk-examples) · [Documentation](https://bitrix24.github.io/b24ui/)
 
 ## Application Templates
 
@@ -69,21 +89,23 @@ Ready-to-use application templates that can be deployed quickly using Docker. Th
 
 ### Automation rules library
 
-[This project](https://github.com/bitrix24/app-template-automation-rules) is a fully deployable application template featuring a library of Bitrix24 automation rules. It’s designed to work both as a local solution and as a scalable application for the Bitrix24 Marketplace.
+[This project](https://github.com/bitrix24/app-template-automation-rules) is a fully deployable application template featuring a library of Bitrix24 automation rules. It's designed to work both as a local solution and as a scalable application for the Bitrix24 Marketplace.
 
-You’re getting a complete package here: the frontend is built with the UI Kit and B24JsSDK, while the backend is set up so you can simply add your own automation rule implementations without having to dig into architectural complexities. No need to reinvent the wheel — just take the foundation and customize it to fit your needs. 
+You're getting a complete package here: the frontend is built with the UI Kit and B24JsSDK, while the backend is set up so you can simply add your own automation rule implementations without having to dig into architectural complexities. No need to reinvent the wheel — just take the foundation and customize it to fit your needs.
+
+  📁 Local: [`examples/app-template-automation/`](examples/app-template-automation/) · [GitHub Repository](https://github.com/bitrix24/app-template-automation-rules)
 
 ## Documentation
 
 - **b24restdocs**: The official repository for Bitrix24 REST API documentation, offering comprehensive guides and references for developers.
 
-  [GitHub Repository](https://github.com/bitrix24/b24restdocs). Read [online version](https://apidocs.bitrix24.com/)
+  📁 Local: [`docs/rest-api/`](docs/rest-api/) · [GitHub Repository](https://github.com/bitrix24/b24restdocs) · [Online version](https://apidocs.bitrix24.com/)
 
 ## Additional Resources
 
 - **crest**: CRest is a minimalistic PHP library for calling Bitrix24 REST methods via webhooks and OAuth 2.0.
 
-  [GitHub Repository](https://github.com/bitrix-tools/crest)
+  📁 Local: [`tools/crest/`](tools/crest/) · [GitHub Repository](https://github.com/bitrix-tools/crest)
 
 ---
 
