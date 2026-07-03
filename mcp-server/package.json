@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "bin": {
-    "b24-dev-hub": "./index.js"
+    "b24-dev-hub": "index.js"
   },
   "files": [
     "index.js",
