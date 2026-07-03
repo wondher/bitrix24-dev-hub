@@ -1,7 +1,7 @@
 {
-  "name": "b24-dev-hub",
+  "name": "@wondher/b24-dev-hub",
   "version": "1.0.0",
-  "description": "MCP server for the Bitrix24 Developer Hub — intelligent search across SDKs, UI components, REST API docs, examples, and templates. Runs over stdio; clones its content cache on first use so `npx b24-dev-hub` works anywhere.",
+  "description": "MCP server for the Bitrix24 Developer Hub — intelligent search across SDKs, UI components, REST API docs, examples, and templates. Runs over stdio; clones its content cache on first use so `npx @wondher/b24-dev-hub` works anywhere.",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -14,6 +14,9 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "restricted"
   },
   "scripts": {
     "start": "node index.js",

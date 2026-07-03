@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "b24-dev-hub": {
-      "command": "node",
-      "args": ["mcp-server/index.js"]
+      "command": "npx",
+      "args": ["-y", "@wondher/b24-dev-hub"]
     }
   }
 }

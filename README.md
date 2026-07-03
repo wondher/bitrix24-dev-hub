@@ -21,14 +21,14 @@ This hub ships with a **local MCP server** (`b24-dev-hub`) that provides intelli
 
 ### Quick start (no clone required)
 
-The server is [published on npm](https://www.npmjs.com/package/b24-dev-hub). Run it anywhere with `npx` — on first use it clones the hub content into `~/.b24-dev-hub/`, then works offline:
+The server is [published on npm](https://www.npmjs.com/package/@wondher/b24-dev-hub) as a **private, scoped package** (`@wondher/b24-dev-hub`). Run it anywhere with `npx` — on first use it clones the hub content into `~/.b24-dev-hub/`, then works offline:
 
 ```bash
 # One-time setup clones the hub (~10k files, a few minutes), then starts the server
-npx b24-dev-hub
+npx @wondher/b24-dev-hub
 ```
 
-Point your MCP-compatible editor at the command `npx b24-dev-hub` (no arguments). Subsequent starts are fast — the search index is built once and cached on disk, so boot is a quick load instead of a re-scan.
+Point your MCP-compatible editor at the command `npx -y @wondher/b24-dev-hub` (no arguments). The `b24-dev-hub` CLI command is also available globally after `npm install -g`. Subsequent starts are fast — the search index is built once and cached on disk, so boot is a quick load instead of a re-scan.
 
 ### Running from a clone
 
