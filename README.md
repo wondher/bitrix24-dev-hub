@@ -17,39 +17,56 @@ git submodule update --init --recursive
 
 ## 🤖 AI-Assisted Development
 
-This hub ships with a **local MCP server** (`b24-dev-hub`) that provides intelligent search and retrieval across all resources. It indexes **11,000+ files** from SDKs, UI components, REST API docs, examples, and templates.
+This hub ships with a **local MCP server** (`b24-dev-hub`) that provides intelligent search and retrieval across all resources. It indexes **10,000+ files** from SDKs, UI components, REST API docs, examples, and templates — searching the **full content** of each file with BM25 ranking, not just titles.
 
-### MCP Server Setup
+### Quick start (no clone required)
 
-The server is pre-configured in [`.mcp.json`](.mcp.json). To use it with Claude Code:
+The server is [published on npm](https://www.npmjs.com/package/b24-dev-hub). Run it anywhere with `npx` — on first use it clones the hub content into `~/.b24-dev-hub/`, then works offline:
 
-1. Open this project in Claude Code
-2. The MCP server starts automatically — approve it when prompted
-3. Run `npm install` inside `mcp-server/` if dependencies are missing
+```bash
+# One-time setup clones the hub (~10k files, a few minutes), then starts the server
+npx b24-dev-hub
+```
+
+Point your MCP-compatible editor at the command `npx b24-dev-hub` (no arguments). Subsequent starts are fast — the search index is built once and cached on disk, so boot is a quick load instead of a re-scan.
+
+### Running from a clone
+
+If you already have this repo (with submodules), the server is pre-configured in [`.mcp.json`](.mcp.json) for Claude Code — open the project and approve the server when prompted, or run it directly:
+
+```bash
+node mcp-server/index.js
+```
+
+### CLI commands
+
+```bash
+b24-dev-hub             # Start the MCP server on stdio
+b24-dev-hub update      # Update hub submodules to latest upstream and reindex
+b24-dev-hub reindex     # Force a full rebuild of the search index
+b24-dev-hub index-info  # Show index location, size, and file counts
+```
+
+Environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `B24_HUB_ROOT` | Use this directory as the hub root instead of resolving it (skips the cache lookup) |
+| `B24_HUB_REPO` | Git URL to clone on first run (default: `wondher/bitrix24-dev-hub`) |
 
 ### Available Tools
 
 | Tool | Description |
 |------|-------------|
-| `b24hub_search` | Universal search across all repos with scope/language filtering |
+| `b24hub_search` | Universal search across all repos, ranked by BM25 over full file contents, with scope/language filtering |
 | `b24hub_get` | Read any file from the hub by path |
 | `b24hub_api_method` | Get REST API method documentation (e.g., `crm.lead.add`) |
 | `b24hub_api_event` | Get REST API event documentation (e.g., `OnCrmLeadAdd`) |
 | `b24hub_sdk_ref` | Get SDK class/method source code (PHP, JS, or Python) |
 | `b24hub_ui_component` | Get UI Kit component source and documentation |
-| `b24hub_examples` | Find code examples by topic and language |
+| `b24hub_examples` | Find code examples by topic and language, ranked by relevance |
 | `b24hub_list` | List available resources by category (methods, components, etc.) |
-| `b24hub_grep` | Search file contents with context lines |
-
-### Standalone Usage
-
-```bash
-# Run the MCP server directly
-node mcp-server/index.js
-
-# Or install dependencies first
-cd mcp-server && npm install && npm start
-```
+| `b24hub_grep` | Search file contents with context lines (cached, ranked by path relevance) |
 
 The root [`CLAUDE.md`](CLAUDE.md) provides structured context for AI agents navigating this hub.
 

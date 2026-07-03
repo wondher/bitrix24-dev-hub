@@ -1,18 +1,52 @@
 /**
  * File reader utilities for the MCP server.
  * Reads files from the hub submodules and extracts relevant content.
+ *
+ * Hub root is resolved lazily via indexer.getHubRoot() so it works whether the
+ * server is running from source or from the npx bootstrap cache.
  */
 
 import { readFile, stat, readdir } from 'node:fs/promises'
 import { join, extname, basename, dirname } from 'node:path'
 import { glob } from 'glob'
-import { HUB_ROOT } from './indexer.js'
+import { getHubRoot } from './indexer.js'
+import { tokenize } from './search.js'
+
+// ─────────────────────────────────────────────────────────────
+// In-process LRU cache for grep results.
+// Keyed by (directory, pattern, dirMtime). Invalidated on reindex via clearCache().
+// ─────────────────────────────────────────────────────────────
+
+const GREP_CACHE_MAX = 64
+const grepCache = new Map()
+
+export function clearCache() {
+  grepCache.clear()
+}
+
+function cacheGet(key) {
+  if (!grepCache.has(key)) return undefined
+  // Refresh recency by re-inserting (LRU).
+  const value = grepCache.get(key)
+  grepCache.delete(key)
+  grepCache.set(key, value)
+  return value
+}
+
+function cacheSet(key, value) {
+  if (grepCache.size >= GREP_CACHE_MAX) {
+    const oldest = grepCache.keys().next().value
+    grepCache.delete(oldest)
+  }
+  grepCache.set(key, value)
+}
 
 /**
  * Read a file from the hub and return its content
  */
 export async function readFileContent(relativePath) {
-  const absPath = join(HUB_ROOT, relativePath)
+  const hubRoot = await getHubRoot()
+  const absPath = join(hubRoot, relativePath)
   const content = await readFile(absPath, 'utf-8')
   return content
 }
@@ -21,7 +55,8 @@ export async function readFileContent(relativePath) {
  * Read a file and return structured info
  */
 export async function readFileDetails(relativePath) {
-  const absPath = join(HUB_ROOT, relativePath)
+  const hubRoot = await getHubRoot()
+  const absPath = join(hubRoot, relativePath)
   const content = await readFile(absPath, 'utf-8')
   const ext = extname(relativePath)
 
@@ -34,11 +69,21 @@ export async function readFileDetails(relativePath) {
 }
 
 /**
- * Search files by content using simple text matching
+ * Search files by content using simple text matching, with an in-process cache
+ * keyed on (directory, pattern, directory mtime) so repeated greps are free
+ * within the lifetime of the server process.
  */
 export async function searchFiles(dirRelative, pattern, options = {}) {
   const { maxResults = 20, filePattern = '**/*', beforeContext = 2, afterContext = 2 } = options
-  const fullDir = join(HUB_ROOT, dirRelative)
+  const hubRoot = await getHubRoot()
+  const fullDir = join(hubRoot, dirRelative)
+
+  // Cache key includes the directory mtime so edits invalidate naturally.
+  let dirMtime = 0
+  try { dirMtime = (await stat(fullDir)).mtimeMs } catch { /* dir may not exist yet */ }
+  const cacheKey = `${dirRelative}\u0000${pattern}\u0000${dirMtime}\u0000${maxResults}`
+  const cached = cacheGet(cacheKey)
+  if (cached) return cached
 
   const files = await glob(filePattern, {
     cwd: fullDir,
@@ -48,6 +93,7 @@ export async function searchFiles(dirRelative, pattern, options = {}) {
 
   const results = []
   const lowerPattern = pattern.toLowerCase()
+  const queryTerms = new Set(tokenize(pattern))
 
   for (const file of files) {
     if (results.length >= maxResults) break
@@ -80,38 +126,63 @@ export async function searchFiles(dirRelative, pattern, options = {}) {
     }
   }
 
+  // When the pattern tokenizes into query terms, rank files by how many of
+  // those terms appear in the path/filename — brings the most relevant files
+  // to the top instead of relying on glob's arbitrary ordering.
+  if (queryTerms.size > 0) {
+    results.sort((a, b) => {
+      const aPath = tokenize(a.path)
+      const bPath = tokenize(b.path)
+      const aHits = aPath.filter(t => queryTerms.has(t)).length
+      const bHits = bPath.filter(t => queryTerms.has(t)).length
+      return bHits - aHits
+    })
+  }
+
+  cacheSet(cacheKey, results)
   return results
 }
 
 /**
- * Find API method documentation in b24restdocs
+ * Find the best-matching API method documentation in b24restdocs.
+ *
+ * Ranking: exact filename match > normalized filename match > content relevance
+ * scored by query-term overlap. Returns the single best candidate.
  */
 export async function findApiMethod(methodName) {
+  const hubRoot = await getHubRoot()
   const normalizedMethod = methodName.toLowerCase().replace(/\./g, '-')
-  const restApiDir = join(HUB_ROOT, 'docs/rest-api')
+  const restApiDir = join(hubRoot, 'docs/rest-api')
 
-  // Search in api-reference directory
   const files = await glob('api-reference/**/*.md', { cwd: restApiDir, nodir: true })
 
-  // Try exact match first
+  // Exact match first.
   let match = files.find(f => basename(f, '.md') === normalizedMethod)
+  let matchKind = 'exact'
 
-  // Try partial match
+  // Normalized partial match.
   if (!match) {
     match = files.find(f => basename(f, '.md').includes(normalizedMethod))
+    matchKind = 'partial'
   }
 
-  // Try searching by method name in content
+  // Content relevance: rank candidates by query-term overlap rather than
+  // returning the first file that merely contains the string.
   if (!match) {
+    const terms = new Set(tokenize(methodName))
+    let best = null
+    let bestScore = 0
     for (const file of files) {
       try {
         const content = await readFile(join(restApiDir, file), 'utf-8')
-        if (content.toLowerCase().includes(methodName.toLowerCase())) {
-          match = file
-          break
-        }
+        const contentTokens = new Set(tokenize(content))
+        let score = 0
+        for (const t of terms) if (contentTokens.has(t)) score++
+        if (content.toLowerCase().includes(methodName.toLowerCase())) score += 2
+        if (score > bestScore) { bestScore = score; best = file }
       } catch { /* skip */ }
     }
+    if (best && bestScore > 0) { match = best; matchKind = 'content' }
   }
 
   if (!match) return null
@@ -121,46 +192,62 @@ export async function findApiMethod(methodName) {
     path: `docs/rest-api/${match}`,
     method: methodName,
     content,
+    matchKind,
   }
 }
 
 /**
- * Find API event documentation in b24restdocs
+ * Find API event documentation in b24restdocs.
  */
 export async function findApiEvent(eventName) {
-  const restApiDir = join(HUB_ROOT, 'docs/rest-api')
+  const hubRoot = await getHubRoot()
+  const restApiDir = join(hubRoot, 'docs/rest-api')
+
+  const eventFiles = await glob('api-reference/**/events/**/*.md', { cwd: restApiDir, nodir: true })
+  const allFiles = eventFiles.length > 0
+    ? eventFiles
+    : await glob('api-reference/**/*.md', { cwd: restApiDir, nodir: true })
+
   const normalizedEvent = eventName.toLowerCase()
+  const terms = new Set(tokenize(eventName))
 
-  const files = await glob('api-reference/**/events/**/*.md', { cwd: restApiDir, nodir: true })
-
-  // Also search all files for the event name
-  const allFiles = files.length > 0 ? files : await glob('api-reference/**/*.md', { cwd: restApiDir, nodir: true })
+  let best = null
+  let bestScore = 0
 
   for (const file of allFiles) {
     try {
       const content = await readFile(join(restApiDir, file), 'utf-8')
-      if (content.toLowerCase().includes(normalizedEvent)) {
-        return {
-          path: `docs/rest-api/${file}`,
-          event: eventName,
-          content,
-        }
-      }
+      const contentLower = content.toLowerCase()
+      let score = 0
+      if (contentLower.includes(normalizedEvent)) score += 5
+      const contentTokens = new Set(tokenize(content))
+      for (const t of terms) if (contentTokens.has(t)) score++
+      // Prefer files in an events/ directory.
+      if (file.includes('/events/')) score += 1
+      if (score > bestScore) { bestScore = score; best = file }
     } catch { /* skip */ }
   }
 
-  return null
+  if (!best || bestScore === 0) return null
+
+  const content = await readFile(join(restApiDir, best), 'utf-8')
+  return {
+    path: `docs/rest-api/${best}`,
+    event: eventName,
+    content,
+  }
 }
 
 /**
- * Find SDK class/method in source code
+ * Find the best-matching SDK class/method in source code.
  */
 export async function findSdkReference(name, sdk) {
+  const hubRoot = await getHubRoot()
   const sdkDir = sdk === 'php' ? 'sdks/php/src'
     : sdk === 'js' ? 'sdks/js/packages'
     : 'sdks/python'
 
-  const fullDir = join(HUB_ROOT, sdkDir)
+  const fullDir = join(hubRoot, sdkDir)
   const lowerName = name.toLowerCase()
 
   const extensions = sdk === 'php' ? '*.php'
@@ -173,20 +260,26 @@ export async function findSdkReference(name, sdk) {
     ignore: ['**/node_modules/**', '**/vendor/**', '**/test*/**', '**/__tests__/**'],
   })
 
-  // Try filename match first
+  // Filename match first.
   let match = files.find(f => basename(f).toLowerCase().includes(lowerName))
+  let matchKind = 'filename'
 
-  // Search content
+  // Content relevance ranking.
   if (!match) {
+    const terms = new Set(tokenize(name))
+    let best = null
+    let bestScore = 0
     for (const file of files) {
       try {
         const content = await readFile(join(fullDir, file), 'utf-8')
-        if (content.toLowerCase().includes(lowerName)) {
-          match = file
-          break
-        }
+        const contentTokens = new Set(tokenize(content))
+        let score = 0
+        for (const t of terms) if (contentTokens.has(t)) score++
+        if (content.toLowerCase().includes(lowerName)) score += 2
+        if (score > bestScore) { bestScore = score; best = file }
       } catch { /* skip */ }
     }
+    if (best && bestScore > 0) { match = best; matchKind = 'content' }
   }
 
   if (!match) return null
@@ -197,46 +290,53 @@ export async function findSdkReference(name, sdk) {
     name,
     sdk,
     content,
+    matchKind,
   }
 }
 
 /**
- * Find UI component by name
+ * Find the best-matching UI component by name.
  */
 export async function findUiComponent(componentName) {
-  const uiDir = join(HUB_ROOT, 'ui/components')
+  const hubRoot = await getHubRoot()
+  const uiDir = join(hubRoot, 'ui/components')
   const lowerName = componentName.toLowerCase()
 
-  // Search in runtime/components
   const files = await glob('src/runtime/components/**/*.vue', {
     cwd: uiDir,
     nodir: true,
   })
 
-  // Try exact filename match
+  // Exact / prefix filename match.
   let match = files.find(f => {
     const base = basename(f, '.vue').toLowerCase()
     return base === lowerName || base === `b24-${lowerName}` || base.includes(lowerName)
   })
+  let matchKind = 'filename'
 
-  // Search content for component name
+  // Content relevance ranking.
   if (!match) {
+    const terms = new Set(tokenize(componentName))
+    let best = null
+    let bestScore = 0
     for (const file of files) {
       try {
         const content = await readFile(join(uiDir, file), 'utf-8')
-        if (content.toLowerCase().includes(lowerName)) {
-          match = file
-          break
-        }
+        const contentTokens = new Set(tokenize(content))
+        let score = 0
+        for (const t of terms) if (contentTokens.has(t)) score++
+        if (content.toLowerCase().includes(lowerName)) score += 2
+        if (score > bestScore) { bestScore = score; best = file }
       } catch { /* skip */ }
     }
+    if (best && bestScore > 0) { match = best; matchKind = 'content' }
   }
 
   if (!match) return null
 
   const content = await readFile(join(uiDir, match), 'utf-8')
 
-  // Also try to find docs for this component
+  // Also try to find docs for this component.
   const docFiles = await glob('docs/content/docs/**/*.md', { cwd: uiDir, nodir: true })
   let docContent = null
   const docMatch = docFiles.find(f => {
@@ -253,21 +353,24 @@ export async function findUiComponent(componentName) {
     content,
     docsPath: docMatch ? `ui/components/${docMatch}` : null,
     docs: docContent,
+    matchKind,
   }
 }
 
 /**
- * Find code examples
+ * Find code examples, ranked by query-term relevance.
  */
 export async function findExamples(topic, language = 'all') {
-  const examplesDir = join(HUB_ROOT, 'examples/sdk-examples')
+  const hubRoot = await getHubRoot()
+  const examplesDir = join(hubRoot, 'examples/sdk-examples')
+  const terms = new Set(tokenize(topic))
   const lowerTopic = topic.toLowerCase()
 
   const langDirs = language === 'all'
     ? await readdir(examplesDir).catch(() => [])
     : [language]
 
-  const results = []
+  const scored = []
 
   for (const lang of langDirs) {
     try {
@@ -283,11 +386,19 @@ export async function findExamples(topic, language = 'all') {
       for (const file of files) {
         try {
           const content = await readFile(join(langDir, file), 'utf-8')
-          if (content.toLowerCase().includes(lowerTopic)) {
-            results.push({
+          const contentTokens = new Set(tokenize(content))
+          let score = 0
+          for (const t of terms) if (contentTokens.has(t)) score++
+          if (content.toLowerCase().includes(lowerTopic)) score += 2
+          // Bonus for the topic appearing in the path/filename.
+          const pathTokens = new Set(tokenize(`${lang}/${file}`))
+          for (const t of terms) if (pathTokens.has(t)) score += 3
+          if (score > 0) {
+            scored.push({
               path: `examples/sdk-examples/${lang}/${file}`,
               language: lang,
               content: content.length > 5000 ? content.slice(0, 5000) + '\n... (truncated)' : content,
+              score,
             })
           }
         } catch { /* skip */ }
@@ -295,18 +406,20 @@ export async function findExamples(topic, language = 'all') {
     } catch { /* skip */ }
   }
 
-  return results.slice(0, 15)
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, 15)
 }
 
 /**
  * List resources by category
  */
 export async function listResources(category, filter = '') {
+  const hubRoot = await getHubRoot()
   const lowerFilter = filter.toLowerCase()
 
   switch (category) {
     case 'api-methods': {
-      const dir = join(HUB_ROOT, 'docs/rest-api')
+      const dir = join(hubRoot, 'docs/rest-api')
       const files = await glob('api-reference/**/*.md', { cwd: dir, nodir: true })
       return files
         .map(f => basename(f, '.md'))
@@ -315,7 +428,7 @@ export async function listResources(category, filter = '') {
     }
 
     case 'api-events': {
-      const dir = join(HUB_ROOT, 'docs/rest-api')
+      const dir = join(hubRoot, 'docs/rest-api')
       const files = await glob('api-reference/**/events/**/*.md', { cwd: dir, nodir: true })
       return files
         .map(f => basename(f, '.md'))
@@ -324,13 +437,13 @@ export async function listResources(category, filter = '') {
     }
 
     case 'sdk-services': {
-      const phpDir = join(HUB_ROOT, 'sdks/php/src/Services')
+      const phpDir = join(hubRoot, 'sdks/php/src/Services')
       const dirs = await readdir(phpDir).catch(() => [])
       return dirs.filter(d => !lowerFilter || d.toLowerCase().includes(lowerFilter)).sort()
     }
 
     case 'ui-components': {
-      const uiDir = join(HUB_ROOT, 'ui/components')
+      const uiDir = join(hubRoot, 'ui/components')
       const files = await glob('src/runtime/components/**/*.vue', { cwd: uiDir, nodir: true })
       return files
         .map(f => basename(f, '.vue'))
@@ -339,7 +452,7 @@ export async function listResources(category, filter = '') {
     }
 
     case 'examples': {
-      const exDir = join(HUB_ROOT, 'examples/sdk-examples')
+      const exDir = join(hubRoot, 'examples/sdk-examples')
       const langs = await readdir(exDir).catch(() => [])
       const all = []
       for (const lang of langs) {
@@ -354,7 +467,7 @@ export async function listResources(category, filter = '') {
     }
 
     case 'sdk-scopes': {
-      const scopeDir = join(HUB_ROOT, 'docs/rest-api/scopes')
+      const scopeDir = join(hubRoot, 'docs/rest-api/scopes')
       const files = await glob('*.md', { cwd: scopeDir, nodir: true }).catch(() => [])
       return files.map(f => basename(f, '.md')).sort()
     }

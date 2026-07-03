@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 
 /**
- * b24-dev-hub-mcp — Local MCP Server for Bitrix24 Developer Hub
+ * b24-dev-hub — MCP Server for the Bitrix24 Developer Hub
  *
  * Provides intelligent search and retrieval across all Bitrix24 development
  * resources: SDKs (PHP, JS, Python), UI components, REST API docs,
  * code examples, app templates, and tools.
+ *
+ * Runs over stdio. On first use it clones its content cache into
+ * ~/.b24-dev-hub/ so `npx b24-dev-hub` works on any machine.
+ *
+ * Subcommands (update / reindex / index-info) are handled by ./cli.js.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { buildIndex, searchIndex, HUB_ROOT } from './lib/indexer.js'
+import { getOrBuildIndex, searchIndex } from './lib/indexer.js'
 import {
   findApiMethod,
   findApiEvent,
@@ -22,9 +27,21 @@ import {
   readFileContent,
   searchFiles,
 } from './lib/reader.js'
+import { runCli } from './cli.js'
 
 // ─────────────────────────────────────────────────────────────
-// Bootstrap
+// Subcommand dispatch: anything other than starting the server.
+// ─────────────────────────────────────────────────────────────
+
+const SUBCOMMANDS = new Set(['update', 'reindex', 'index-info', '--help', '-h', 'help'])
+const firstArg = process.argv[2]
+
+if (firstArg && SUBCOMMANDS.has(firstArg)) {
+  await runCli(process.argv)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bootstrap: build (or load) the search index.
 // ─────────────────────────────────────────────────────────────
 
 const server = new McpServer({
@@ -32,9 +49,9 @@ const server = new McpServer({
   version: '1.0.0',
 })
 
-console.error('[b24-dev-hub] Building search index...')
-const index = await buildIndex()
-console.error(`[b24-dev-hub] Indexed ${index.stats.total} files (${Object.entries(index.stats.byCategory).map(([k, v]) => `${k}: ${v}`).join(', ')})`)
+console.error('[b24-dev-hub] Starting up...')
+const index = await getOrBuildIndex()
+console.error(`[b24-dev-hub] Index ready (${index.entries.length} files)`)
 
 // ─────────────────────────────────────────────────────────────
 // Tool 1: b24hub_search — Universal search across all repos
@@ -43,7 +60,8 @@ console.error(`[b24-dev-hub] Indexed ${index.stats.total} files (${Object.entrie
 server.tool(
   'b24hub_search',
   `Search across all Bitrix24 development resources (SDKs, UI components, REST API docs, examples, templates). ` +
-  `Returns matching files with relevance scores and snippets. Use this to discover what's available before diving deeper.`,
+  `Returns matching files ranked by relevance (BM25 over the full file contents — not just titles) with snippets. ` +
+  `Use this to discover what's available before diving deeper.`,
   {
     query: z.string().describe('Search query — method name, component name, topic, class name, etc.'),
     scope: z.enum(['all', 'api', 'sdk', 'ui', 'examples', 'template', 'tool'])
@@ -68,7 +86,7 @@ server.tool(
     }
 
     const text = results.map((r, i) => {
-      const score = `📊 Score: ${r.score}`
+      const score = `📊 Score: ${r.score.toFixed(2)}`
       const meta = `📂 ${r.category} | 💻 ${r.language}`
       return [
         `### ${i + 1}. ${r.title}`,
@@ -256,8 +274,8 @@ server.tool(
 
 server.tool(
   'b24hub_examples',
-  `Find code examples for a specific topic or use case. Searches across all SDK example projects. ` +
-  `Returns matching example code with language labels.`,
+  `Find code examples for a specific topic or use case. Searches across all SDK example projects ` +
+  `and ranks results by relevance. Returns matching example code with language labels.`,
   {
     topic: z.string().describe('Topic or use case to find examples for (e.g., "auth", "crud", "webhook", "deal", "batch")'),
     language: z.enum(['all', 'php', 'js', 'python']).default('all')
@@ -335,7 +353,8 @@ server.tool(
 server.tool(
   'b24hub_grep',
   `Search for text patterns inside hub files with surrounding context. Like grep but returns ` +
-  `matching lines with context. Useful for finding specific API calls, configurations, or patterns.`,
+  `matching lines with context. Results are cached and ranked by path relevance. ` +
+  `Useful for finding specific API calls, configurations, or patterns.`,
   {
     pattern: z.string().describe('Text pattern to search for'),
     directory: z.enum([

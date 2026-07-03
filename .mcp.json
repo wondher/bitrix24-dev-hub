@@ -2,8 +2,7 @@
   "mcpServers": {
     "b24-dev-hub": {
       "command": "node",
-      "args": ["/Users/brianmendes/Documents/GitHub/bitrix24-dev-hub/mcp-server/index.js"],
-      "type": "stdio"
+      "args": ["mcp-server/index.js"]
     }
   }
 }

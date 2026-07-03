@@ -26,3 +26,7 @@ dist/
 
 # MCP server dependencies
 mcp-server/node_modules/
+
+# MCP server persisted index + cache (created at runtime, never committed)
+.b24-index/
+

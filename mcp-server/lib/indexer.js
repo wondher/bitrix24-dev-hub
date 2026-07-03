@@ -1,15 +1,28 @@
 /**
- * Indexer — Scans all submodule directories and builds a lightweight search index.
- * Each entry has: path, title, category, language, snippet, lastModified
+ * Indexer — scans the hub submodule directories and builds a search index that
+ * includes the full tokenized content (not just metadata), an inverted index
+ * for fast term lookup, and document-length stats for BM25 ranking.
+ *
+ * Public API:
+ *   - buildIndex(hubRoot)        : build a fresh index from disk
+ *   - getOrBuildIndex(hubRoot)   : load persisted index if current, else build+save
+ *   - searchIndex(index, query)  : run a query (delegates to search.rank)
+ *   - getHubRoot()               : resolve and memoize the hub root
+ *   - HUB_ROOT                   : resolved lazily via getHubRoot()
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises'
-import { join, extname, basename, relative } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
+import { join, extname, basename } from 'node:path'
 import { glob } from 'glob'
+import { tokenize, buildInvertedIndex, rank } from './search.js'
+import {
+  resolveHubRoot,
+  loadIndex,
+  saveIndex,
+  computeManifest,
+} from './store.js'
 
-const HUB_ROOT = join(import.meta.dirname, '..', '..')
-
-// Category mappings based on directory
+// Category → directory mappings based on hub layout.
 const CATEGORY_MAP = {
   'sdks/php': { category: 'sdk', language: 'php' },
   'sdks/js': { category: 'sdk', language: 'js' },
@@ -23,42 +36,52 @@ const CATEGORY_MAP = {
   'tools/crest': { category: 'tool', language: 'php' },
 }
 
-// Extensions to index
 const INDEXABLE_EXTENSIONS = new Set([
   '.md', '.mdx',
   '.php', '.ts', '.tsx', '.js', '.jsx',
   '.vue', '.py',
-  '.json', // package.json only
+  '.json',
   '.yaml', '.yml',
 ])
 
-// Directories to skip
 const SKIP_DIRS = new Set([
   'node_modules', 'vendor', '.git', '.nuxt', '.output', 'dist',
-  '__pycache__', '.cache', 'coverage', '.turbo',
+  '__pycache__', '.cache', 'coverage', '.turbo', '.b24-index',
 ])
 
+let _hubRoot = null
+
 /**
- * Extract a title from file content (first H1 or class/function declaration)
+ * Resolve and memoize the hub root. Bootstraps the cache on first use.
+ * @returns {Promise<string>}
+ */
+export async function getHubRoot() {
+  if (_hubRoot) return _hubRoot
+  _hubRoot = await resolveHubRoot()
+  return _hubRoot
+}
+
+// Backwards-compat export: callers that import { HUB_ROOT } should await
+// getHubRoot() instead. We expose the lazy resolver for code that needs the
+// path synchronously after bootstrap.
+export { getHubRoot as resolveHubRootSync }
+
+/**
+ * Extract a title from file content (first H1 or class/function declaration).
  */
 function extractTitle(content, filePath) {
-  // Markdown: first # heading
   const mdMatch = content.match(/^#\s+(.+)$/m)
   if (mdMatch) return mdMatch[1].trim()
 
-  // PHP: class name
   const phpClass = content.match(/(?:class|interface|trait|enum)\s+(\w+)/)
   if (phpClass) return phpClass[1]
 
-  // TS/JS: export class/function/interface
   const tsExport = content.match(/export\s+(?:default\s+)?(?:class|function|interface|type|const|enum)\s+(\w+)/)
   if (tsExport) return tsExport[1]
 
-  // Vue: component name from defineOptions or file name
   const vueName = content.match(/name:\s*['"](\w+)['"]/)
   if (vueName) return vueName[1]
 
-  // Python: class or def
   const pyDef = content.match(/(?:class|def)\s+(\w+)/)
   if (pyDef) return pyDef[1]
 
@@ -66,10 +89,9 @@ function extractTitle(content, filePath) {
 }
 
 /**
- * Extract a short snippet from content
+ * Extract a short display snippet from content (first meaningful paragraph).
  */
 function extractSnippet(content, maxLen = 200) {
-  // Strip code blocks and HTML tags for snippet
   const clean = content
     .replace(/```[\s\S]*?```/g, '')
     .replace(/<[^>]+>/g, '')
@@ -77,47 +99,49 @@ function extractSnippet(content, maxLen = 200) {
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 
-  // Take first meaningful paragraph
   const lines = clean.split('\n').filter(l => l.trim().length > 10)
   const snippet = lines.slice(0, 3).join(' ').slice(0, maxLen)
   return snippet.length < clean.length ? snippet + '...' : snippet
 }
 
 /**
- * Detect if a file is worth indexing
+ * Decide whether a file is worth indexing.
  */
 function shouldIndex(filePath) {
   const ext = extname(filePath)
   const base = basename(filePath)
 
-  // Always index markdown
   if (ext === '.md' || ext === '.mdx') return true
 
-  // Skip test files
-  if (filePath.includes('/test') || filePath.includes('/tests') || filePath.includes('/__tests__') || filePath.includes('.test.') || filePath.includes('.spec.')) return false
+  // Skip test/spec files and directories. Match on path segments so that
+  // "tests/...", "/tests/...", "foo.test.js" are all caught regardless of
+  // whether the leading slash is present.
+  const TEST_RE = /(^|\/)(tests?|__tests__|__mocks__)(\/|$)|\.(test|spec)\./i
+  if (TEST_RE.test(filePath)) return false
 
-  // Skip config/build files
   if (base.startsWith('.') && base !== '.env.example') return false
   if (['package-lock.json', 'composer.lock', 'yarn.lock', 'pnpm-lock.yaml'].includes(base)) return false
 
-  // Index source code
   if (['.php', '.ts', '.tsx', '.js', '.jsx', '.vue', '.py'].includes(ext)) return true
 
-  // Only index specific JSON files
   if (ext === '.json' && ['package.json', 'composer.json', 'tsconfig.json'].includes(base)) return false
 
   return INDEXABLE_EXTENSIONS.has(ext)
 }
 
 /**
- * Build the search index
+ * Build a fresh index from disk, tokenizing full content per file.
+ *
+ * @param {string} [hubRootOverride] Optional explicit hub root.
+ * @returns {Promise<object>} The built index object.
  */
-export async function buildIndex() {
+export async function buildIndex(hubRootOverride) {
+  const hubRoot = hubRootOverride || await getHubRoot()
   const entries = []
   const stats = { total: 0, byCategory: {} }
 
   for (const [dir, meta] of Object.entries(CATEGORY_MAP)) {
-    const fullPath = join(HUB_ROOT, dir)
+    const fullPath = join(hubRoot, dir)
     let dirExists
     try {
       dirExists = (await stat(fullPath)).isDirectory()
@@ -140,19 +164,20 @@ export async function buildIndex() {
         const content = await readFile(absPath, 'utf-8')
         if (content.length === 0) continue
 
-        const title = extractTitle(content, file)
-        const snippet = extractSnippet(content)
-
-        const entry = {
-          path: join(dir, file),       // relative to hub root
-          title,
+        const id = entries.length
+        entries.push({
+          id,
+          path: join(dir, file),     // relative to hub root
+          title: extractTitle(content, file),
           category: meta.category,
           language: meta.language,
-          snippet,
+          snippet: extractSnippet(content),
           size: content.length,
-        }
+          // Full content is tokenized here; only the token list is kept in
+          // memory (not the raw content) to bound memory usage.
+          tokens: tokenize(content),
+        })
 
-        entries.push(entry)
         stats.total++
         stats.byCategory[meta.category] = (stats.byCategory[meta.category] || 0) + 1
       } catch {
@@ -161,57 +186,58 @@ export async function buildIndex() {
     }
   }
 
-  return { entries, stats }
+  const { inverted, docLengths, avgDocLength } = buildInvertedIndex(entries)
+
+  // The token lists are only needed during index construction; drop them to
+  // keep the persisted index compact.
+  for (const entry of entries) delete entry.tokens
+
+  return {
+    stats,
+    entries,
+    inverted,
+    docLengths,
+    avgDocLength,
+  }
 }
 
 /**
- * Search the index
+ * Load a persisted index if its manifest is current, otherwise build fresh and
+ * save. This is what the server should call on startup for a fast boot.
+ *
+ * @param {string} [hubRootOverride]
+ * @param {object} [options]
+ * @param {boolean} [options.forceRebuild=false]
+ * @returns {Promise<object>}
  */
-export function searchIndex(index, query, options = {}) {
-  const { scope = 'all', language = 'all', limit = 20 } = options
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
+export async function getOrBuildIndex(hubRootOverride, options = {}) {
+  const { forceRebuild = false } = options
+  const hubRoot = hubRootOverride || await getHubRoot()
 
-  let results = index.entries
-
-  // Filter by scope
-  if (scope !== 'all') {
-    results = results.filter(e => e.category === scope)
-  }
-
-  // Filter by language
-  if (language !== 'all') {
-    results = results.filter(e => e.language === language || e.language === 'mixed')
-  }
-
-  // Score and sort by relevance
-  const scored = results.map(entry => {
-    const titleLower = entry.title.toLowerCase()
-    const pathLower = entry.path.toLowerCase()
-    const snippetLower = entry.snippet.toLowerCase()
-
-    let score = 0
-    for (const term of terms) {
-      // Title match (highest weight)
-      if (titleLower.includes(term)) score += 10
-      // Path/filename match
-      if (pathLower.includes(term)) score += 5
-      // Snippet match
-      if (snippetLower.includes(term)) score += 2
+  if (!forceRebuild) {
+    const cached = await loadIndex(hubRoot)
+    if (cached) {
+      console.error(`[b24-dev-hub] Loaded cached index (${cached.entries.length} files)`)
+      return cached
     }
+  }
 
-    // Bonus for exact title match
-    if (terms.length === 1 && titleLower === terms[0]) score += 50
-
-    // Bonus for short titles (likely more specific)
-    if (entry.title.length < 30) score += 1
-
-    return { ...entry, score }
+  console.error('[b24-dev-hub] Building search index (full scan)...')
+  const index = await buildIndex(hubRoot)
+  const manifest = await computeManifest(hubRoot)
+  await saveIndex(hubRoot, index, manifest).catch(e => {
+    console.error(`[b24-dev-hub] Warning: could not persist index: ${e.message}`)
   })
-
-  return scored
-    .filter(e => e.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
+  console.error(
+    `[b24-dev-hub] Indexed ${index.stats.total} files ` +
+    `(${Object.entries(index.stats.byCategory).map(([k, v]) => `${k}: ${v}`).join(', ')})`
+  )
+  return index
 }
 
-export { HUB_ROOT }
+/**
+ * Run a search query against an index (thin wrapper around search.rank).
+ */
+export function searchIndex(index, query, options = {}) {
+  return rank(query, index, options)
+}
