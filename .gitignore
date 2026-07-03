@@ -30,3 +30,7 @@ mcp-server/node_modules/
 # MCP server persisted index + cache (created at runtime, never committed)
 .b24-index/
 
+# Never commit auth tokens. The project .npmrc (registry mapping only) IS
+# committed; any .npmrc containing a token must stay in ~/.npmrc instead.
+**/.npmrc.local
+

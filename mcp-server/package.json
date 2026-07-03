@@ -15,8 +15,14 @@
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wondher/bitrix24-dev-hub.git",
+    "directory": "mcp-server"
+  },
   "publishConfig": {
-    "access": "restricted"
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "start": "node index.js",

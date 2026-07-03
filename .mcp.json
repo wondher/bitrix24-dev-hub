@@ -2,7 +2,11 @@
   "mcpServers": {
     "b24-dev-hub": {
       "command": "npx",
-      "args": ["-y", "@wondher/b24-dev-hub"]
+      "args": ["-y", "@wondher/b24-dev-hub@latest"],
+      "env": {
+        "B24_HUB_REPO": "https://github.com/wondher/bitrix24-dev-hub.git"
+      }
     }
   }
 }
+
