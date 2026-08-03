@@ -64,6 +64,8 @@ Environment variables:
 |----------|---------|
 | `B24_HUB_ROOT` | Use this directory as the hub root instead of resolving it (skips the cache lookup) |
 | `B24_HUB_REPO` | Git URL to clone on first run (default: `wondher/bitrix24-dev-hub`) |
+| `B24_CONFIG_PATH` | Absolute path to a `.b24.config.json` for live `b24_call` API calls (default: `<hubRoot>/.b24.config.json`) |
+| `B24_PROFILE` | Active profile inside `.b24.config.json` (default: `default`) — handy for switching portals |
 
 ### Available Tools
 
@@ -78,6 +80,48 @@ Environment variables:
 | `b24hub_examples` | Find code examples by topic and language, ranked by relevance |
 | `b24hub_list` | List available resources by category (methods, components, etc.) |
 | `b24hub_grep` | Search file contents with context lines (cached, ranked by path relevance) |
+| `b24_call` | Make a **live** REST call to a configured Bitrix24 portal (webhook auth). See [Live API calls](#-live-api-calls-b24_call) |
+
+### 🔌 Live API calls (`b24_call`)
+
+`b24_call` lets the AI make real REST requests to your Bitrix24 portal — like a Postman call — so it can pull actual data (SPA entity types, deal stages, fields, deals, tasks, users) before designing or modifying a process flow. The other 9 tools (`b24hub_*`) only read local documentation; `b24_call` is the only one that performs outbound network calls.
+
+**Setup (one-time, ~30 seconds):**
+
+1. In Bitrix24, go to **Developer resources → Inbound webhook**, grant the scopes you need (e.g. `crm`, `tasks`, `user`, `im`), and copy the resulting URL — it looks like `https://your-portal.bitrix24.com/rest/89/abc123...`.
+2. Copy `.b24.config.example.json` to `.b24.config.json` at the repo root and fill in the values:
+
+   ```json
+   {
+     "profiles": {
+       "default": {
+         "baseUrl": "https://your-portal.bitrix24.com",
+         "userId": "89",
+         "webhookToken": "abc123-your-webhook-code"
+       }
+     }
+   }
+   ```
+
+`.b24.config.json` is gitignored — **the token stays on your machine and never reaches the repository**. The tracked `.b24.config.example.json` is just the schema. If the config is missing, `b24_call` returns setup instructions instead of failing.
+
+**Example use cases:**
+
+```
+# Smoke test — confirm the webhook works
+b24_call({ method: "app.info" })
+
+# List SPA entity types, then inspect one
+b24_call({ method: "crm.item.list", params: { entityTypeId: 152 }, start: 0 })
+
+# Pull the stages of a deal pipeline before building a flow
+b24_call({ method: "crm.dealcategory.stage.list", params: { id: 0 } })
+
+# Discover the fields available on an entity
+b24_call({ method: "crm.item.fields", params: { entityTypeId: 152 } })
+```
+
+Pagination is handled automatically: when Bitrix24 returns `next`, the response tells the AI to call again with `start: <next>`. Payloads over ~20 KB are truncated to protect the context window.
 
 The root [`CLAUDE.md`](CLAUDE.md) provides structured context for AI agents navigating this hub.
 

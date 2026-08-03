@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy this file to .b24.config.json (gitignored) and fill in your webhook. The b24_call MCP tool reads it to make live REST calls against your Bitrix24 portal. To create the webhook: Bitrix24 → Developer resources → Inbound webhook, grant the scopes you need (crm, tasks, user, im, main, ...) and copy the resulting URL's userId + token below.",
+  "profiles": {
+    "default": {
+      "baseUrl": "https://seu-portal.bitrix24.com.br",
+      "userId": "89",
+      "webhookToken": "cole-aqui-o-codigo-do-webhook-inbound"
+    }
+  }
+}

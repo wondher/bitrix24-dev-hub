@@ -34,3 +34,10 @@ mcp-server/node_modules/
 # committed; any .npmrc containing a token must stay in ~/.npmrc instead.
 **/.npmrc.local
 
+# Local Bitrix24 endpoint config for live API calls (b24_call tool).
+# The token lives ONLY here — never commit it. The .example.json is the
+# tracked schema.
+.b24.config.json
+.b24.config.*.json
+!.b24.config.example.json
+

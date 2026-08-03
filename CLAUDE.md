@@ -39,6 +39,7 @@ bitrix24-dev-hub/
 | Style a Bitrix24 app | `ui/style/` | `ui/components/`, `ui/icons/` |
 | Use icons in an app | `ui/icons/` | `ui/components/` |
 | Publish to Marketplace | `docs/rest-api/market/` | `examples/app-template-automation/` |
+| Explore real portal data (SPA, stages, fields) | `b24_call` tool | `docs/rest-api/`, `sdks/*` |
 
 ## Authentication Overview
 
@@ -48,6 +49,23 @@ Bitrix24 REST API supports three integration scenarios:
 3. **Public Applications (OAuth 2.0)** — for mass-market Marketplace apps
 
 All SDKs support webhook and OAuth authentication.
+
+## Live API calls (`b24_call` tool)
+
+The `b24_call` MCP tool makes **real outbound HTTPS requests** to a configured Bitrix24 portal (inbound-webhook auth only, v1). Use it to pull actual data before designing or modifying a process flow. The token lives in a gitignored `.b24.config.json` at the hub root and is never exposed in tool responses.
+
+**Prerequisite**: `.b24.config.json` must exist (copy `.b24.config.example.json`). If missing, `b24_call` returns setup instructions. Override location with `B24_CONFIG_PATH`, or pick a profile with `B24_PROFILE`.
+
+Typical discovery flow for a SPA process:
+
+```
+1. b24_call({ method: "app.info" })                                  # smoke test
+2. b24_call({ method: "crm.item.list", params: { entityTypeId: 152 } })  # list items
+3. b24_call({ method: "crm.item.fields", params: { entityTypeId: 152 } }) # discover fields
+4. b24_call({ method: "crm.dealcategory.stage.list", params: { id: 0 } }) # pipeline stages
+```
+
+Pagination is surfaced as a `next page: call again with start: N` hint; payloads over ~20 KB are truncated. Combine with `b24hub_api_method` to read the method's documentation before calling it.
 
 ## SDK Quick Reference
 

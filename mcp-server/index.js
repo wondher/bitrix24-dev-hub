@@ -27,6 +27,11 @@ import {
   readFileContent,
   searchFiles,
 } from './lib/reader.js'
+import {
+  loadEndpointConfig,
+  callB24Method,
+  formatB24Result,
+} from './lib/b24client.js'
 import { runCli } from './cli.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -396,6 +401,86 @@ server.tool(
         type: 'text',
         text: `Found "${pattern}" in ${results.length} file(s) inside ${directory}:\n\n${text}`,
       }],
+    }
+  }
+)
+
+// ─────────────────────────────────────────────────────────────
+// Tool 10: b24_call — Live Bitrix24 REST call via a locally configured webhook
+// ─────────────────────────────────────────────────────────────
+
+server.tool(
+  'b24_call',
+  `Make a LIVE REST API call against the user's Bitrix24 portal, configured via a local ` +
+  `.b24.config.json file (gitignored). Works like a Postman call: provide a method name ` +
+  `(e.g., "crm.item.list", "crm.dealcategory.stage.list", "user.get") and any params, and you ` +
+  `get the real JSON response back. Use this to explore actual data — SPA entity types, stages, ` +
+  `fields, deals, contacts, tasks — before designing or modifying process flows. ` +
+  `The webhook token is read from the local config and is never exposed in the response. ` +
+  `Good smoke tests: app.info, user.current. ` +
+  `NOTE: this performs a real outbound HTTPS request to the portal.` +
+  `\n\nRequires setup: copy .b24.config.example.json to .b24.config.json and fill in baseUrl, ` +
+  `userId and webhookToken. Set B24_PROFILE to pick a non-default profile, or B24_CONFIG_PATH ` +
+  `to point at a custom config location.`,
+  {
+    method: z.string().describe('REST API method in dot notation (e.g., "crm.item.list", "user.get")'),
+    params: z.record(z.unknown()).default({})
+      .describe('Request parameters as a JSON object (e.g., { entityTypeId: 152, filter: {...} })'),
+    start: z.number().int().min(0).optional()
+      .describe('Pagination offset for *.list methods (Bitrix24 "start" param). Omit on the first page.'),
+  },
+  async ({ method, params, start }) => {
+    let cfg
+    try {
+      cfg = await loadEndpointConfig()
+    } catch (e) {
+      return {
+        content: [{ type: 'text', text: `❌ Invalid Bitrix24 endpoint config: ${e.message}` }],
+        isError: true,
+      }
+    }
+
+    if (!cfg) {
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `⚙️ Bitrix24 live calls are not configured yet.\n\n` +
+            `Copy \`.b24.config.example.json\` to \`.b24.config.json\` at the repo root ` +
+            `and fill in your webhook details:\n\n` +
+            `\`\`\`json\n` +
+            `{\n` +
+            `  "profiles": {\n` +
+            `    "default": {\n` +
+            `      "baseUrl": "https://your-portal.bitrix24.com",\n` +
+            `      "userId": "89",\n` +
+            `      "webhookToken": "your-inbound-webhook-token"\n` +
+            `    }\n` +
+            `  }\n` +
+            `}\n` +
+            `\`\`\`\n\n` +
+            `Then create the inbound webhook in Bitrix24 (Developer resources → Inbound webhook) ` +
+            `with the scopes you need (crm, tasks, user, ...). The file is gitignored — the token ` +
+            `stays on your machine.`,
+        }],
+        isError: true,
+      }
+    }
+
+    try {
+      const result = await callB24Method(cfg, method, params, { start })
+      return {
+        content: [{ type: 'text', text: formatB24Result(method, result, start ?? 0) }],
+      }
+    } catch (e) {
+      const parts = [`❌ \`${method}\` failed: ${e.message}`]
+      if (e.response !== undefined) {
+        parts.push('```json\n' + JSON.stringify(e.response, null, 2).slice(0, 4000) + '\n```')
+      }
+      return {
+        content: [{ type: 'text', text: parts.join('\n\n') }],
+        isError: true,
+      }
     }
   }
 )
