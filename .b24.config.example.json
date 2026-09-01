@@ -3,7 +3,7 @@
   "profiles": {
     "default": {
       "baseUrl": "https://seu-portal.bitrix24.com.br",
-      "userId": "89",
+      "userId": "seu-id-de-usuario",
       "webhookToken": "cole-aqui-o-codigo-do-webhook-inbound"
     }
   }

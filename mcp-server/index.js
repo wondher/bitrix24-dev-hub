@@ -13,7 +13,7 @@
  * Subcommands (update / reindex / index-info) are handled by ./cli.js.
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { getOrBuildIndex, searchIndex } from './lib/indexer.js'
@@ -32,7 +32,19 @@ import {
   callB24Method,
   formatB24Result,
 } from './lib/b24client.js'
+import { withTimeout } from './lib/toolguard.js'
+import { formatDocPage, DEFAULT_PAGE_CHARS } from './lib/paginate.js'
+import { assertMutationAllowed } from './lib/liveguard.js'
+import { buildPrompt, methodResourceUri } from './lib/surface.js'
+import { parseMethodDoc, formatCatalog } from './lib/catalog.js'
 import { runCli } from './cli.js'
+
+const pageFields = {
+  offset: z.number().int().min(0).default(0)
+    .describe('Character offset into the document. Use the Next page offset from a previous response.'),
+  limit: z.number().int().min(500).max(80_000).default(DEFAULT_PAGE_CHARS)
+    .describe(`Maximum characters to return (default ${DEFAULT_PAGE_CHARS}).`),
+}
 
 // ─────────────────────────────────────────────────────────────
 // Subcommand dispatch: anything other than starting the server.
@@ -55,14 +67,25 @@ const server = new McpServer({
 })
 
 console.error('[b24-dev-hub] Starting up...')
-const index = await getOrBuildIndex()
-console.error(`[b24-dev-hub] Index ready (${index.entries.length} files)`)
+
+// Build the search index in the background. Cursor sends `initialize` as soon
+// as the process starts; awaiting the index here leaves stdin unread and the
+// client spinner never stops (createClient times out at ~60s).
+const indexPromise = getOrBuildIndex()
+async function getIndex() {
+  return indexPromise
+}
+
+const addTool = server.tool.bind(server)
+function registerTool(name, description, schema, handler) {
+  addTool(name, description, schema, withTimeout(handler, 25_000, name))
+}
 
 // ─────────────────────────────────────────────────────────────
 // Tool 1: b24hub_search — Universal search across all repos
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_search',
   `Search across all Bitrix24 development resources (SDKs, UI components, REST API docs, examples, templates). ` +
   `Returns matching files ranked by relevance (BM25 over the full file contents — not just titles) with snippets. ` +
@@ -79,7 +102,7 @@ server.tool(
       .describe('Maximum number of results'),
   },
   async ({ query, scope, language, limit }) => {
-    const results = searchIndex(index, query, { scope, language, limit })
+    const results = searchIndex(await getIndex(), query, { scope, language, limit })
 
     if (results.length === 0) {
       return {
@@ -116,17 +139,23 @@ server.tool(
 // Tool 2: b24hub_get — Read any file from the hub
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_get',
-  `Read the full content of any file in the Bitrix24 developer hub. Use b24hub_search first to find relevant files, then b24hub_get to read them.`,
+  `Read a file from the Bitrix24 developer hub. Long files are paged ` +
+  `(default ${DEFAULT_PAGE_CHARS} chars) with a heading outline; pass offset to continue. ` +
+  `Use b24hub_search first to find the path.`,
   {
     path: z.string().describe('File path relative to the hub root (e.g., "sdks/php/src/Services/CRM/Lead/LeadService.php")'),
+    ...pageFields,
   },
-  async ({ path }) => {
+  async ({ path, offset, limit }) => {
     try {
       const content = await readFileContent(path)
       return {
-        content: [{ type: 'text', text: content }],
+        content: [{
+          type: 'text',
+          text: formatDocPage({ title: path, path, content, offset, limit }),
+        }],
       }
     } catch (e) {
       return {
@@ -141,14 +170,24 @@ server.tool(
 // Tool 3: b24hub_api_method — Get REST API method docs
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_api_method',
-  `Get detailed documentation for a Bitrix24 REST API method. Returns parameters, examples, response format, and error codes. ` +
-  `Input the method name in dot notation (e.g., "crm.lead.add", "disk.file.upload").`,
+  `Get documentation for a Bitrix24 REST API method. Default response is a structured catalog ` +
+  `(scope, params, nested fields, returns, errors, one example) parsed from the local docs — ` +
+  `the same shape the official Bitrix24 MCP advertises, so you do not invent field names. ` +
+  `field=markdown returns the paged source (default ${DEFAULT_PAGE_CHARS} chars). ` +
+  `filter narrows tabbed params (Lead, Deal, entityTypeId) or examples by language. ` +
+  `Input the method name in dot notation (e.g., "crm.lead.add", "crm.item.add").`,
   {
     method: z.string().describe('REST API method name in dot notation (e.g., "crm.lead.add", "user.get", "tasks.task.list")'),
+    field: z.enum(['all', 'parameters', 'returns', 'errors', 'examples', 'markdown'])
+      .default('all')
+      .describe('Catalog section to return. Default all. markdown = paged source with outline.'),
+    filter: z.string().default('')
+      .describe('Narrow parameters by variant (Lead, Deal, 1) or examples by language (js, php, webhook).'),
+    ...pageFields,
   },
-  async ({ method }) => {
+  async ({ method, field, filter, offset, limit }) => {
     const result = await findApiMethod(method)
 
     if (!result) {
@@ -161,10 +200,30 @@ server.tool(
       }
     }
 
+    if (field === 'markdown') {
+      return {
+        content: [{
+          type: 'text',
+          text: formatDocPage({
+            title: `# ${method}`,
+            path: result.path,
+            content: result.content,
+            offset,
+            limit,
+          }),
+        }],
+      }
+    }
+
+    const catalog = parseMethodDoc({
+      content: result.content,
+      path: result.path,
+      method,
+    })
     return {
       content: [{
         type: 'text',
-        text: `# ${method}\n📁 Source: ${result.path}\n\n${result.content}`,
+        text: formatCatalog(catalog, { field, filter }),
       }],
     }
   }
@@ -174,14 +233,15 @@ server.tool(
 // Tool 4: b24hub_api_event — Get REST API event docs
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_api_event',
   `Get documentation for a Bitrix24 REST API event (webhook/event handler). ` +
   `Input the event name (e.g., "OnCrmLeadAdd", "OnTaskAdd").`,
   {
     event: z.string().describe('Event name (e.g., "OnCrmLeadAdd", "OnTaskAdd", "OnAfterUserAdd")'),
+    ...pageFields,
   },
-  async ({ event }) => {
+  async ({ event, offset, limit }) => {
     const result = await findApiEvent(event)
 
     if (!result) {
@@ -197,7 +257,13 @@ server.tool(
     return {
       content: [{
         type: 'text',
-        text: `# Event: ${event}\n📁 Source: ${result.path}\n\n${result.content}`,
+        text: formatDocPage({
+          title: `# Event: ${event}`,
+          path: result.path,
+          content: result.content,
+          offset,
+          limit,
+        }),
       }],
     }
   }
@@ -207,15 +273,16 @@ server.tool(
 // Tool 5: b24hub_sdk_ref — Get SDK class/method source
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_sdk_ref',
   `Get SDK source code for a specific class, method, or service. Searches in the PHP, JavaScript, or Python SDK source code. ` +
   `Returns the full source file where the item is defined.`,
   {
     name: z.string().describe('Class, method, or service name (e.g., "LeadService", "B24Hook", "Client")'),
     sdk: z.enum(['php', 'js', 'python']).describe('Which SDK to search in'),
+    ...pageFields,
   },
-  async ({ name, sdk }) => {
+  async ({ name, sdk, offset, limit }) => {
     const result = await findSdkReference(name, sdk)
 
     if (!result) {
@@ -231,7 +298,13 @@ server.tool(
     return {
       content: [{
         type: 'text',
-        text: `# ${name} (${sdk} SDK)\n📁 Source: ${result.path}\n\n${result.content}`,
+        text: formatDocPage({
+          title: `# ${name} (${sdk} SDK)`,
+          path: result.path,
+          content: result.content,
+          offset,
+          limit,
+        }),
       }],
     }
   }
@@ -241,14 +314,15 @@ server.tool(
 // Tool 6: b24hub_ui_component — Get UI component details
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_ui_component',
   `Get source code and documentation for a Bitrix24 UI Kit component. ` +
   `Returns the Vue component source, props, slots, and related documentation.`,
   {
     name: z.string().describe('Component name (e.g., "Button", "InputText", "DataTable", "Sidebar")'),
+    ...pageFields,
   },
-  async ({ name }) => {
+  async ({ name, offset, limit }) => {
     const result = await findUiComponent(name)
 
     if (!result) {
@@ -261,14 +335,22 @@ server.tool(
       }
     }
 
-    let text = `# Component: ${name}\n📁 Source: ${result.path}\n\n${result.content}`
-
+    let body = result.content
     if (result.docs) {
-      text += `\n\n---\n\n# 📖 Documentation\n📁 Docs: ${result.docsPath}\n\n${result.docs}`
+      body += `\n\n---\n\n# Documentation\n📁 Docs: ${result.docsPath}\n\n${result.docs}`
     }
 
     return {
-      content: [{ type: 'text', text }],
+      content: [{
+        type: 'text',
+        text: formatDocPage({
+          title: `# Component: ${name}`,
+          path: result.path,
+          content: body,
+          offset,
+          limit,
+        }),
+      }],
     }
   }
 )
@@ -277,10 +359,10 @@ server.tool(
 // Tool 7: b24hub_examples — Find code examples
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_examples',
-  `Find code examples for a specific topic or use case. Searches across all SDK example projects ` +
-  `and ranks results by relevance. Returns matching example code with language labels.`,
+  `Find code examples for a specific topic or use case. Searches examples/sdk-examples (php, js) ` +
+  `and sdks/python/examples. Returns matching example code with language labels.`,
   {
     topic: z.string().describe('Topic or use case to find examples for (e.g., "auth", "crud", "webhook", "deal", "batch")'),
     language: z.enum(['all', 'php', 'js', 'python']).default('all')
@@ -315,10 +397,13 @@ server.tool(
 // Tool 8: b24hub_list — List available resources by category
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_list',
   `List all available resources in a specific category. Use this to discover what's available ` +
-  `before searching for specific items. Supports filtering by prefix.`,
+  `before searching for specific items. Supports filtering by prefix. ` +
+  `sdk-scopes returns REST permission codes from permissions.md (crm, task, user, …). ` +
+  `sdk-services lists php/<Scope>, python/<scope>, js/<module> (hook, frame, oauth, …). ` +
+  `examples includes php/*, js/*, and python/<scope> from sdks/python/examples.`,
   {
     category: z.enum([
       'api-methods',
@@ -355,7 +440,7 @@ server.tool(
 // Tool 9: b24hub_grep — Content search with context
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24hub_grep',
   `Search for text patterns inside hub files with surrounding context. Like grep but returns ` +
   `matching lines with context. Results are cached and ranked by path relevance. ` +
@@ -409,14 +494,15 @@ server.tool(
 // Tool 10: b24_call — Live Bitrix24 REST call via a locally configured webhook
 // ─────────────────────────────────────────────────────────────
 
-server.tool(
+registerTool(
   'b24_call',
   `Make a LIVE REST API call against the user's Bitrix24 portal, configured via a local ` +
   `.b24.config.json file (gitignored). Works like a Postman call: provide a method name ` +
-  `(e.g., "crm.item.list", "crm.dealcategory.stage.list", "user.get") and any params, and you ` +
+  `(e.g., "crm.item.list", "crm.status.list", "user.get") and any params, and you ` +
   `get the real JSON response back. Use this to explore actual data — SPA entity types, stages, ` +
   `fields, deals, contacts, tasks — before designing or modifying process flows. ` +
   `The webhook token is read from the local config and is never exposed in the response. ` +
+  `Write methods (*.add, *.update, *.delete, event.bind, batch, …) require confirm: true. ` +
   `Good smoke tests: app.info, user.current. ` +
   `NOTE: this performs a real outbound HTTPS request to the portal.` +
   `\n\nRequires setup: copy .b24.config.example.json to .b24.config.json and fill in baseUrl, ` +
@@ -428,8 +514,17 @@ server.tool(
       .describe('Request parameters as a JSON object (e.g., { entityTypeId: 152, filter: {...} })'),
     start: z.number().int().min(0).optional()
       .describe('Pagination offset for *.list methods (Bitrix24 "start" param). Omit on the first page.'),
+    confirm: z.boolean().default(false)
+      .describe('Must be true for methods that mutate the portal (*.add, *.update, *.delete, event.bind, batch, …).'),
   },
-  async ({ method, params, start }) => {
+  async ({ method, params, start, confirm }) => {
+    const blocked = assertMutationAllowed(method, confirm)
+    if (blocked) {
+      return {
+        content: [{ type: 'text', text: blocked }],
+        isError: true,
+      }
+    }
     let cfg
     try {
       cfg = await loadEndpointConfig()
@@ -486,10 +581,154 @@ server.tool(
 )
 
 // ─────────────────────────────────────────────────────────────
+// Resources + named prompts
+// ─────────────────────────────────────────────────────────────
+
+async function hubMarkdown(relativePath) {
+  try {
+    return await readFileContent(relativePath)
+  } catch (e) {
+    return `Not found: ${relativePath} (${e.message})`
+  }
+}
+
+server.registerResource(
+  'skill',
+  'b24://skill',
+  { description: 'Agent playbook: intent → MCP tool', mimeType: 'text/markdown' },
+  async uri => ({
+    contents: [{
+      uri: String(uri),
+      mimeType: 'text/markdown',
+      text: await hubMarkdown('.cursor/skills/b24-dev-hub/SKILL.md'),
+    }],
+  }),
+)
+
+server.registerResource(
+  'conventions',
+  'b24://conventions',
+  { description: 'Bitrix24 SPA, stages, auth, and SDK entry points', mimeType: 'text/markdown' },
+  async uri => ({
+    contents: [{
+      uri: String(uri),
+      mimeType: 'text/markdown',
+      text: await hubMarkdown('.cursor/skills/b24-dev-hub/bitrix24-conventions.md'),
+    }],
+  }),
+)
+
+server.registerResource(
+  'scopes',
+  'b24://scopes',
+  { description: 'REST permission scope codes', mimeType: 'text/markdown' },
+  async uri => ({
+    contents: [{
+      uri: String(uri),
+      mimeType: 'text/markdown',
+      text: await hubMarkdown('docs/rest-api/api-reference/scopes/permissions.md'),
+    }],
+  }),
+)
+
+server.registerResource(
+  'methods',
+  'b24://methods',
+  { description: 'Inventory of REST method doc filenames', mimeType: 'text/plain' },
+  async uri => {
+    const names = await listResources('api-methods')
+    return {
+      contents: [{
+        uri: String(uri),
+        mimeType: 'text/plain',
+        text: names.join('\n'),
+      }],
+    }
+  },
+)
+
+server.registerResource(
+  'method',
+  new ResourceTemplate('b24://method/{name}', {
+    list: async () => {
+      const names = await listResources('api-methods')
+      return {
+        resources: names.slice(0, 80).map(name => ({
+          uri: methodResourceUri(name),
+          name,
+          mimeType: 'text/markdown',
+          description: 'REST method documentation',
+        })),
+      }
+    },
+    complete: {
+      name: async value => {
+        const names = await listResources('api-methods', String(value || ''))
+        return names.slice(0, 20).map(n => n.replace(/-/g, '.'))
+      },
+    },
+  }),
+  { description: 'Bitrix24 REST method documentation by name', mimeType: 'text/markdown' },
+  async (uri, variables) => {
+    const method = String(variables.name || '').replace(/-/g, '.')
+    const result = await findApiMethod(method)
+    let text
+    if (!result) {
+      text = `REST API method "${method}" not found. Use b24hub_search with scope "api".`
+    } else {
+      text = formatCatalog(parseMethodDoc({
+        content: result.content,
+        path: result.path,
+        method,
+      }))
+    }
+    return {
+      contents: [{ uri: String(uri), mimeType: 'text/markdown', text }],
+    }
+  },
+)
+
+server.registerPrompt(
+  'spa-discovery',
+  {
+    description: 'Discover SPA entity types, fields, and stages on the live portal (crm.status.list).',
+    argsSchema: {
+      entityTypeId: z.string().optional().describe('SPA entityTypeId if already known'),
+    },
+  },
+  async args => buildPrompt('spa-discovery', args || {}),
+)
+
+server.registerPrompt(
+  'event-handler',
+  {
+    description: 'Recipe to document an event and register a handler via event.bind.',
+    argsSchema: {
+      event: z.string().optional().describe('Event name (e.g. OnCrmLeadAdd)'),
+    },
+  },
+  async args => buildPrompt('event-handler', args || {}),
+)
+
+server.registerPrompt(
+  'local-app',
+  {
+    description: 'Scaffold a local Bitrix24 app (webhook or iframe) in php, js, or python.',
+    argsSchema: {
+      language: z.string().optional().describe('php, js, or python'),
+    },
+  },
+  async args => buildPrompt('local-app', args || {}),
+)
+
+// ─────────────────────────────────────────────────────────────
 // Start server
 // ─────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport()
+transport.onerror = (error) => {
+  console.error('[b24-dev-hub] stdio error:', error)
+}
 await server.connect(transport)
 
 console.error('[b24-dev-hub] MCP server running on stdio')

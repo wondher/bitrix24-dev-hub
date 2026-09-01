@@ -61,6 +61,11 @@ export async function getHubRoot() {
   return _hubRoot
 }
 
+/** Drop the memo so tests can point B24_HUB_ROOT at a fixture. */
+export function resetHubRoot() {
+  _hubRoot = null
+}
+
 // Backwards-compat export: callers that import { HUB_ROOT } should await
 // getHubRoot() instead. We expose the lazy resolver for code that needs the
 // path synchronously after bootstrap.
@@ -214,14 +219,36 @@ export async function getOrBuildIndex(hubRootOverride, options = {}) {
   const { forceRebuild = false } = options
   const hubRoot = hubRootOverride || await getHubRoot()
 
+  // Test hook: handshake.test.js uses this to prove initialize is not blocked
+  // by index construction. Not set in production.
+  const slowMs = Number(process.env.B24_SLOW_INDEX_MS || 0)
+  if (slowMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, slowMs))
+  }
+
   if (!forceRebuild) {
     const cached = await loadIndex(hubRoot)
     if (cached) {
       console.error(`[b24-dev-hub] Loaded cached index (${cached.entries.length} files)`)
       return cached
     }
+
+    const stale = await loadIndex(hubRoot, { allowStale: true })
+    if (stale) {
+      console.error(
+        `[b24-dev-hub] Serving stale index (${stale.entries.length} files) while rebuilding`
+      )
+      buildAndSave(hubRoot).catch(e => {
+        console.error(`[b24-dev-hub] Background reindex failed: ${e.message}`)
+      })
+      return stale
+    }
   }
 
+  return buildAndSave(hubRoot)
+}
+
+async function buildAndSave(hubRoot) {
   console.error('[b24-dev-hub] Building search index (full scan)...')
   const index = await buildIndex(hubRoot)
   const manifest = await computeManifest(hubRoot)

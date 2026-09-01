@@ -260,13 +260,24 @@ export async function findSdkReference(name, sdk) {
     ignore: ['**/node_modules/**', '**/vendor/**', '**/test*/**', '**/__tests__/**'],
   })
 
-  // Filename match first.
-  let match = files.find(f => basename(f).toLowerCase().includes(lowerName))
-  let matchKind = 'filename'
+  // Filename match: exact basename (sans extension) beats substring; among
+  // substring hits, prefer the shallower path so `client.py` wins over nested
+  // `booking/.../client.py`.
+  const stem = (f) => basename(f, extname(f)).toLowerCase()
+  const byDepth = (a, b) => a.split('/').length - b.split('/').length || a.length - b.length
+  let match = files.find(f => stem(f) === lowerName)
+  if (!match) {
+    const partials = files.filter(f => stem(f).includes(lowerName) || basename(f).toLowerCase().includes(lowerName))
+    if (partials.length) match = [...partials].sort(byDepth)[0]
+  }
+  let matchKind = match ? 'filename' : null
 
   // Content relevance ranking.
   if (!match) {
     const terms = new Set(tokenize(name))
+    const decl = new RegExp(
+      `(?:export\\s+)?(?:default\\s+)?(?:class|function|interface|type|const|def)\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`
+    )
     let best = null
     let bestScore = 0
     for (const file of files) {
@@ -276,6 +287,8 @@ export async function findSdkReference(name, sdk) {
         let score = 0
         for (const t of terms) if (contentTokens.has(t)) score++
         if (content.toLowerCase().includes(lowerName)) score += 2
+        if (decl.test(content)) score += 20
+        score -= file.split('/').length
         if (score > bestScore) { bestScore = score; best = file }
       } catch { /* skip */ }
     }
@@ -307,12 +320,13 @@ export async function findUiComponent(componentName) {
     nodir: true,
   })
 
-  // Exact / prefix filename match.
-  let match = files.find(f => {
-    const base = basename(f, '.vue').toLowerCase()
-    return base === lowerName || base === `b24-${lowerName}` || base.includes(lowerName)
-  })
-  let matchKind = 'filename'
+  // Exact filename first (Button.vue before ButtonGroup.vue).
+  const baseOf = (f) => basename(f, '.vue').toLowerCase()
+  let match = files.find(f => baseOf(f) === lowerName || baseOf(f) === `b24-${lowerName}`)
+  if (!match) {
+    match = files.find(f => baseOf(f).includes(lowerName))
+  }
+  let matchKind = match ? 'filename' : null
 
   // Content relevance ranking.
   if (!match) {
@@ -358,45 +372,68 @@ export async function findUiComponent(componentName) {
 }
 
 /**
+ * Example roots: PHP/JS live under examples/sdk-examples/{lang}/.
+ * Python snippets live under sdks/python/examples/ (there is no python/ folder
+ * in sdk-examples).
+ */
+async function exampleRoots(hubRoot, language) {
+  const roots = []
+  if (language === 'all' || language === 'php' || language === 'js') {
+    const base = join(hubRoot, 'examples/sdk-examples')
+    const langs = language === 'all'
+      ? (await readdir(base).catch(() => [])).filter(l => l !== 'python')
+      : [language]
+    for (const lang of langs) {
+      roots.push({
+        abs: join(base, lang),
+        rel: `examples/sdk-examples/${lang}`,
+        language: lang,
+      })
+    }
+  }
+  if (language === 'all' || language === 'python') {
+    roots.push({
+      abs: join(hubRoot, 'sdks/python/examples'),
+      rel: 'sdks/python/examples',
+      language: 'python',
+    })
+  }
+  return roots
+}
+
+/**
  * Find code examples, ranked by query-term relevance.
  */
 export async function findExamples(topic, language = 'all') {
   const hubRoot = await getHubRoot()
-  const examplesDir = join(hubRoot, 'examples/sdk-examples')
   const terms = new Set(tokenize(topic))
   const lowerTopic = topic.toLowerCase()
-
-  const langDirs = language === 'all'
-    ? await readdir(examplesDir).catch(() => [])
-    : [language]
-
+  const roots = await exampleRoots(hubRoot, language)
   const scored = []
 
-  for (const lang of langDirs) {
+  for (const root of roots) {
     try {
-      const langDir = join(examplesDir, lang)
-      if (!(await stat(langDir)).isDirectory()) continue
+      if (!(await stat(root.abs)).isDirectory()) continue
 
       const files = await glob('**/*.{md,php,ts,js,py,vue}', {
-        cwd: langDir,
+        cwd: root.abs,
         nodir: true,
         ignore: ['**/node_modules/**'],
       })
 
       for (const file of files) {
         try {
-          const content = await readFile(join(langDir, file), 'utf-8')
+          const content = await readFile(join(root.abs, file), 'utf-8')
           const contentTokens = new Set(tokenize(content))
           let score = 0
           for (const t of terms) if (contentTokens.has(t)) score++
           if (content.toLowerCase().includes(lowerTopic)) score += 2
-          // Bonus for the topic appearing in the path/filename.
-          const pathTokens = new Set(tokenize(`${lang}/${file}`))
+          const pathTokens = new Set(tokenize(`${root.language}/${file}`))
           for (const t of terms) if (pathTokens.has(t)) score += 3
           if (score > 0) {
             scored.push({
-              path: `examples/sdk-examples/${lang}/${file}`,
-              language: lang,
+              path: `${root.rel}/${file}`,
+              language: root.language,
               content: content.length > 5000 ? content.slice(0, 5000) + '\n... (truncated)' : content,
               score,
             })
@@ -437,9 +474,34 @@ export async function listResources(category, filter = '') {
     }
 
     case 'sdk-services': {
+      const items = []
+
       const phpDir = join(hubRoot, 'sdks/php/src/Services')
-      const dirs = await readdir(phpDir).catch(() => [])
-      return dirs.filter(d => !lowerFilter || d.toLowerCase().includes(lowerFilter)).sort()
+      for (const name of await readdir(phpDir).catch(() => [])) {
+        try {
+          if (!(await stat(join(phpDir, name))).isDirectory()) continue
+          items.push(`php/${name}`)
+        } catch { /* skip */ }
+      }
+
+      const pyDir = join(hubRoot, 'sdks/python/b24pysdk/scopes')
+      for (const name of await readdir(pyDir).catch(() => [])) {
+        if (name.startsWith('_')) continue
+        items.push(`python/${name.replace(/\.py$/, '')}`)
+      }
+
+      const jsDir = join(hubRoot, 'sdks/js/packages/jssdk/src')
+      for (const name of await readdir(jsDir).catch(() => [])) {
+        if (name === 'types' || name === 'index.ts' || name === 'index.js') continue
+        try {
+          if (!(await stat(join(jsDir, name))).isDirectory()) continue
+          items.push(`js/${name}`)
+        } catch { /* skip */ }
+      }
+
+      return items
+        .filter(n => !lowerFilter || n.toLowerCase().includes(lowerFilter))
+        .sort()
     }
 
     case 'ui-components': {
@@ -452,29 +514,64 @@ export async function listResources(category, filter = '') {
     }
 
     case 'examples': {
+      const all = []
       const exDir = join(hubRoot, 'examples/sdk-examples')
       const langs = await readdir(exDir).catch(() => [])
-      const all = []
       for (const lang of langs) {
         try {
           const langDir = join(exDir, lang)
           if (!(await stat(langDir)).isDirectory()) continue
           const dirs = await readdir(langDir).catch(() => [])
-          all.push(...dirs.filter(d => !lowerFilter || d.toLowerCase().includes(lowerFilter)).map(d => `${lang}/${d}`))
+          all.push(...dirs
+            .filter(d => !lowerFilter || d.toLowerCase().includes(lowerFilter))
+            .map(d => `${lang}/${d}`))
+        } catch { /* skip */ }
+      }
+      const pyScopes = join(hubRoot, 'sdks/python/examples/scopes')
+      for (const d of await readdir(pyScopes).catch(() => [])) {
+        try {
+          if (!(await stat(join(pyScopes, d))).isDirectory()) continue
+          const label = `python/${d}`
+          if (!lowerFilter || label.toLowerCase().includes(lowerFilter) || d.toLowerCase().includes(lowerFilter)) {
+            all.push(label)
+          }
         } catch { /* skip */ }
       }
       return all.sort()
     }
 
     case 'sdk-scopes': {
-      const scopeDir = join(hubRoot, 'docs/rest-api/scopes')
-      const files = await glob('*.md', { cwd: scopeDir, nodir: true }).catch(() => [])
-      return files.map(f => basename(f, '.md')).sort()
+      const scopeFile = join(hubRoot, 'docs/rest-api/api-reference/scopes/permissions.md')
+      const markdown = await readFile(scopeFile, 'utf-8').catch(() => '')
+      return parseScopeCodes(markdown)
+        .filter(code => !lowerFilter || code.toLowerCase().includes(lowerFilter))
+        .sort()
     }
 
     default:
       return []
   }
+}
+
+/**
+ * Parse Bitrix24 REST scope codes from the permissions.md table.
+ * Rows look like `|| **crm** | …` or `|| **sonet_group, socialnetwork** | …`.
+ */
+export function parseScopeCodes(markdown) {
+  const codes = []
+  const seen = new Set()
+  const rowRe = /^\|\|\s*\*\*([^*]+)\*\*/gm
+  for (const match of markdown.matchAll(rowRe)) {
+    const raw = match[1].trim()
+    if (/^scope code$/i.test(raw)) continue
+    for (const part of raw.split(',')) {
+      const code = part.trim()
+      if (!code || seen.has(code)) continue
+      seen.add(code)
+      codes.push(code)
+    }
+  }
+  return codes
 }
 
 // Helper

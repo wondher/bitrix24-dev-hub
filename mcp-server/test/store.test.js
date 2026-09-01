@@ -80,3 +80,28 @@ test('loadIndex returns null after clearIndex', async (t) => {
   await clearIndex(hub)
   assert.equal(await loadIndex(hub), null, 'index should be gone after clear')
 })
+
+test('loadIndex({ allowStale: true }) returns an index whose manifest hash no longer matches', async (t) => {
+  const hub = await makeTempHub()
+  t.after(() => rm(hub, { recursive: true, force: true }))
+
+  const index = {
+    stats: { total: 1, byCategory: { api: 1 } },
+    entries: [{ id: 0, path: 'foo.md', title: 'Foo', category: 'api', language: 'markdown', snippet: 'snip', size: 3 }],
+    inverted: { foo: new Map([[0, 2]]) },
+    docLengths: [3],
+    avgDocLength: 3,
+  }
+  const manifest = await computeManifest(hub)
+  await saveIndex(hub, index, manifest)
+
+  await writeFile(
+    join(hub, '.b24-index', 'manifest.json'),
+    JSON.stringify({ hash: 'definitely-stale', version: INDEX_VERSION }, null, 2)
+  )
+
+  assert.equal(await loadIndex(hub), null, 'fresh load rejects a stale manifest')
+  const stale = await loadIndex(hub, { allowStale: true })
+  assert.ok(stale, 'allowStale should still deserialize the last build')
+  assert.equal(stale.entries[0].title, 'Foo')
+})

@@ -131,7 +131,7 @@ export async function computeManifest(hubRoot) {
  * @param {string} hubRoot
  * @returns {Promise<object|null>} The loaded index, or null if it must be rebuilt.
  */
-export async function loadIndex(hubRoot) {
+export async function loadIndex(hubRoot, { allowStale = false } = {}) {
   const manifestFile = manifestPath(hubRoot)
   const indexFile = indexPath(hubRoot)
 
@@ -141,11 +141,12 @@ export async function loadIndex(hubRoot) {
     const current = await computeManifest(hubRoot)
     const saved = JSON.parse(await readFile(manifestFile, 'utf-8'))
 
-    if (saved.hash !== current.hash) return null
+    if (saved.hash !== current.hash && !allowStale) return null
 
     const raw = await readFile(indexFile, 'utf-8')
     return deserializeIndex(raw)
-  } catch {
+  } catch (e) {
+    console.error(`[b24-dev-hub] Could not load index: ${e.message}`)
     return null
   }
 }
@@ -215,13 +216,25 @@ function deserializeIndex(raw) {
 // ─────────────────────────────────────────────────────────────
 
 function runGit(args, options = {}) {
+  const { timeoutMs = 60_000, ...spawnOpts } = options
   return new Promise((resolve, reject) => {
+    // Never inherit stdout: git progress on stdout corrupts MCP JSON-RPC.
     const child = spawn('git', args, {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      ...options,
+      ...spawnOpts,
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-    child.on('error', reject)
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error(`git ${args.join(' ')} timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+    child.stdout.on('data', d => process.stderr.write(d))
+    child.stderr.on('data', d => process.stderr.write(d))
+    child.on('error', err => {
+      clearTimeout(timer)
+      reject(err)
+    })
     child.on('close', code => {
+      clearTimeout(timer)
       if (code === 0) resolve()
       else reject(new Error(`git ${args.join(' ')} exited with code ${code}`))
     })
@@ -229,12 +242,22 @@ function runGit(args, options = {}) {
 }
 
 function runGitCapture(args, options = {}) {
+  const { timeoutMs = 30_000, ...spawnOpts } = options
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'], ...options })
+    const child = spawn('git', args, { ...spawnOpts, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error(`git ${args.join(' ')} timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
     child.stdout.on('data', d => { out += d })
-    child.on('error', reject)
+    child.stderr.on('data', () => {})
+    child.on('error', err => {
+      clearTimeout(timer)
+      reject(err)
+    })
     child.on('close', code => {
+      clearTimeout(timer)
       if (code === 0) resolve(out)
       else reject(new Error(`git ${args.join(' ')} exited with code ${code}`))
     })

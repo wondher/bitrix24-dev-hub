@@ -73,7 +73,7 @@ Environment variables:
 |------|-------------|
 | `b24hub_search` | Universal search across all repos, ranked by BM25 over full file contents, with scope/language filtering |
 | `b24hub_get` | Read any file from the hub by path |
-| `b24hub_api_method` | Get REST API method documentation (e.g., `crm.lead.add`) |
+| `b24hub_api_method` | Structured REST method catalog (params, errors, scope). `field=markdown` for the paged source |
 | `b24hub_api_event` | Get REST API event documentation (e.g., `OnCrmLeadAdd`) |
 | `b24hub_sdk_ref` | Get SDK class/method source code (PHP, JS, or Python) |
 | `b24hub_ui_component` | Get UI Kit component source and documentation |
@@ -114,8 +114,8 @@ b24_call({ method: "app.info" })
 # List SPA entity types, then inspect one
 b24_call({ method: "crm.item.list", params: { entityTypeId: 152 }, start: 0 })
 
-# Pull the stages of a deal pipeline before building a flow
-b24_call({ method: "crm.dealcategory.stage.list", params: { id: 0 } })
+# Pull the stages of a pipeline (Lead STATUS, Deal DEAL_STAGE, SPA DYNAMIC_<id>_STAGE_<cat>)
+b24_call({ method: "crm.status.list", params: { filter: { ENTITY_ID: "DEAL_STAGE" }, order: { SORT: "ASC" } } })
 
 # Discover the fields available on an entity
 b24_call({ method: "crm.item.fields", params: { entityTypeId: 152 } })
@@ -123,7 +123,7 @@ b24_call({ method: "crm.item.fields", params: { entityTypeId: 152 } })
 
 Pagination is handled automatically: when Bitrix24 returns `next`, the response tells the AI to call again with `start: <next>`. Payloads over ~20 KB are truncated to protect the context window.
 
-The root [`CLAUDE.md`](CLAUDE.md) provides structured context for AI agents navigating this hub.
+The root [`AGENTS.md`](AGENTS.md) is the short intent → tool router. The full playbook is [`.cursor/skills/b24-dev-hub/SKILL.md`](.cursor/skills/b24-dev-hub/SKILL.md). Golden retrieval tasks live in [`mcp-server/evals/GOLDEN.md`](mcp-server/evals/GOLDEN.md).
 
 ## 📚 Table of Contents
 
